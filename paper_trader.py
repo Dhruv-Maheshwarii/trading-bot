@@ -57,7 +57,7 @@ def send_email(subject, body):
 
 # ── Fetch data + calculate indicators ──
 def get_signal():
-    exchange = ccxt.binance()
+    exchange = ccxt.kucoin()
     ohlcv    = exchange.fetch_ohlcv('BTC/USDT', '1d', limit=100)
     df       = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
     df['date'] = pd.to_datetime(df['timestamp'], unit='ms')

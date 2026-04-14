@@ -56,7 +56,7 @@ st.sidebar.markdown("- ATR below volatility limit")
 def fetch_and_run(coin, limit, rsi_thresh, tp_pct, sl_pct, atr_thresh):
 
     # Fetch data
-    exchange = ccxt.binance()
+    exchange = ccxt.kucoin()
     ohlcv = exchange.fetch_ohlcv(coin, '1d', limit=limit)
     df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
     df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
