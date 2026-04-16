@@ -8,6 +8,53 @@ from datetime import datetime
 from dotenv import load_dotenv
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import pickle
+import numpy as np
+
+# Load ML model
+def load_ml_model():
+    try:
+        with open('model.pkl', 'rb') as f:
+            model = pickle.load(f)
+        with open('features.pkl', 'rb') as f:
+            features = pickle.load(f)
+        return model, features
+    except:
+        print("⚠️ ML model not found — running without ML filter")
+        return None, None
+
+def get_ml_signal(model, features, data):
+    if model is None:
+        return True, 0.5
+    try:
+        X = pd.DataFrame([[
+            data['rsi'],
+            data['macd'],
+            data['macd_sig'],
+            data['macd_hist'],
+            data['atr_pct'],
+            data['bb_pct'],
+            data['momentum_3'],
+            data['momentum_7'],
+            data['momentum_14'],
+            data['vol_ratio'],
+            data['ma7_21_ratio'],
+            data['ma21_50_ratio'],
+            data['price_ma50'],
+            data['prev_day_1'],
+            data['prev_day_2'],
+            data['prev_day_3'],
+            data['hl_range'],
+            data['close_pos'],
+            data['vol_spike']
+        ]], columns=features)
+        prediction  = model.predict(X)[0]
+        probability = model.predict_proba(X)[0]
+        up_conf     = probability[1]
+        return prediction == 1, up_conf
+    except Exception as e:
+        print(f"⚠️ ML error: {e}")
+        return True, 0.5
 
 load_dotenv()
 EMAIL_SENDER   = os.getenv("EMAIL_SENDER")
@@ -57,7 +104,7 @@ def send_email(subject, body):
 
 # ── Fetch data + calculate indicators ──
 def get_signal():
-    exchange = ccxt.kucoin()
+    exchange = ccxt.bybit()
     ohlcv    = exchange.fetch_ohlcv('BTC/USDT', '1d', limit=100)
     df       = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
     df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -100,16 +147,38 @@ def get_signal():
     buy_signal  = ma_buy and rsi_ok_buy and macd_buy and macd_positive and above_ma50 and low_volatility and ma21_rising
     sell_signal = ma_sell and rsi_ok_sell and macd_sell
 
+    # Extra features for ML
+    latest2 = df.iloc[-2]
+    latest3 = df.iloc[-3]
+    latest4 = df.iloc[-4]
+
     return {
-        'signal':    'BUY'  if buy_signal else 'SELL' if sell_signal else 'HOLD',
-        'price':     latest['close'],
-        'rsi':       latest['RSI'],
-        'macd':      latest['MACD'],
-        'atr_pct':   latest['ATR_pct'],
-        'ma7':       latest['MA7'],
-        'ma21':      latest['MA21'],
-        'ma50':      latest['MA50'],
-        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M')
+        'signal':        'BUY'  if buy_signal else 'SELL' if sell_signal else 'HOLD',
+        'price':         latest['close'],
+        'rsi':           latest['RSI'],
+        'macd':          latest['MACD'],
+        'macd_sig':      latest['MACD_signal'],
+        'macd_hist':     latest['MACD'] - latest['MACD_signal'],
+        'atr_pct':       latest['ATR_pct'],
+        'bb_pct':        (latest['close'] - (latest['close'] - 2*df['close'].rolling(20).std().iloc[-1])) /
+                         (4 * df['close'].rolling(20).std().iloc[-1]) if df['close'].rolling(20).std().iloc[-1] != 0 else 0.5,
+        'momentum_3':    df['close'].pct_change(3).iloc[-1]  * 100,
+        'momentum_7':    df['close'].pct_change(7).iloc[-1]  * 100,
+        'momentum_14':   df['close'].pct_change(14).iloc[-1] * 100,
+        'vol_ratio':     latest['volume'] / df['volume'].rolling(7).mean().iloc[-1],
+        'ma7_21_ratio':  latest['MA7']  / latest['MA21'],
+        'ma21_50_ratio': latest['MA21'] / latest['MA50'],
+        'price_ma50':    latest['close'] / latest['MA50'],
+        'prev_day_1':    df['close'].pct_change(1).iloc[-1] * 100,
+        'prev_day_2':    df['close'].pct_change(2).iloc[-1] * 100,
+        'prev_day_3':    df['close'].pct_change(3).iloc[-1] * 100,
+        'hl_range':      (latest['high'] - latest['low']) / latest['close'] * 100,
+        'close_pos':     (latest['close'] - latest['low']) / (latest['high'] - latest['low']) if latest['high'] != latest['low'] else 0.5,
+        'vol_spike':     latest['volume'] / df['volume'].rolling(30).mean().iloc[-1],
+        'ma7':           latest['MA7'],
+        'ma21':          latest['MA21'],
+        'ma50':          latest['MA50'],
+        'timestamp':     datetime.now().strftime('%Y-%m-%d %H:%M')
     }
 
 # ── Execute paper trade ──
@@ -211,29 +280,45 @@ def execute_trade(portfolio, data):
 def run_bot():
     print("🤖 AlgoTrade Paper Trading Bot Started!")
     print("=" * 45)
-    print("Strategy  : MA + RSI + MACD + ATR")
+    print("Strategy  : MA + RSI + MACD + ATR + ML")
     print("Pair      : BTC/USDT")
     print("Interval  : Every 1 hour")
     print("=" * 45)
 
+    # Load ML model
+    model, features = load_ml_model()
+    if model:
+        print("🧠 ML Model loaded successfully!")
+    
     portfolio = load_portfolio()
+    save_portfolio(portfolio)
     print(f"💰 Portfolio: ${portfolio['cash']:,.2f} cash | {portfolio['btc']:.6f} BTC")
     print("Press Ctrl+C to stop\n")
 
     while True:
         try:
-            now = datetime.now().strftime('%Y-%m-%d %H:%M')
+            now  = datetime.now().strftime('%Y-%m-%d %H:%M')
             print(f"⏰ [{now}] Checking market...")
 
             data = get_signal()
-            print(f"   Price: ${data['price']:,.2f} | RSI: {data['rsi']:.1f} | Signal: {data['signal']}")
+            ml_up, ml_conf = get_ml_signal(model, features, data)
+
+            print(f"   Price : ${data['price']:,.2f}")
+            print(f"   RSI   : {data['rsi']:.1f}")
+            print(f"   Signal: {data['signal']}")
+            print(f"   ML    : {'🟢 UP' if ml_up else '🔴 DOWN'} ({ml_conf*100:.1f}% confidence)")
+
+            # Only execute BUY if ML also confirms UP with 55%+ confidence
+            if data['signal'] == 'BUY' and not (ml_up and ml_conf > 0.55):
+                print(f"   ⚠️ ML filtered out BUY signal — not confident enough")
+                data['signal'] = 'HOLD'
 
             portfolio = execute_trade(portfolio, data)
 
-            # Portfolio summary
             if portfolio['btc'] > 0:
                 current_value = portfolio['btc'] * data['price']
-                pnl = ((current_value - portfolio['buy_price'] * portfolio['btc']) / (portfolio['buy_price'] * portfolio['btc'])) * 100
+                pnl = ((current_value - portfolio['buy_price'] * portfolio['btc']) /
+                       (portfolio['buy_price'] * portfolio['btc'])) * 100
                 print(f"   📊 Holding BTC | Value: ${current_value:,.2f} | P&L: {pnl:.2f}%")
             else:
                 print(f"   📊 Holding CASH | ${portfolio['cash']:,.2f}")

@@ -10,7 +10,7 @@ warnings.filterwarnings('ignore')
 
 # ── Step 1: Fetch lots of historical data ──
 print("📥 Fetching historical data...")
-exchange = ccxt.kucoin()
+exchange = ccxt.bybit()
 ohlcv    = exchange.fetch_ohlcv('BTC/USDT', '1d', limit=1000)
 df       = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
 df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -62,6 +62,19 @@ df['momentum_14'] = df['close'].pct_change(14) * 100
 # Volume momentum
 df['vol_ma7']  = df['volume'].rolling(7).mean()
 df['vol_ratio']= df['volume'] / df['vol_ma7']
+# Previous day returns
+df['prev_day_1'] = df['close'].pct_change(1) * 100
+df['prev_day_2'] = df['close'].pct_change(2) * 100
+df['prev_day_3'] = df['close'].pct_change(3) * 100
+
+# High/Low range
+df['hl_range']   = (df['high'] - df['low']) / df['close'] * 100
+
+# Close position in daily range
+df['close_pos']  = (df['close'] - df['low']) / (df['high'] - df['low'])
+
+# Volume spike
+df['vol_spike']  = df['volume'] / df['volume'].rolling(30).mean()
 
 # MA ratios
 df['ma7_21_ratio']  = df['MA7']  / df['MA21']
@@ -76,10 +89,10 @@ print("🏷️  Creating labels...")
 # Look 7 days into future — did price go up more than 3%?
 df['future_return'] = df['close'].shift(-7) / df['close'] - 1
 
+#predict UP or DOWN
 def label(ret):
-    if ret > 0.03:   return 1   # BUY  — price went up 3%+
-    elif ret < -0.03: return -1  # SELL — price went down 3%+
-    else:             return 0   # HOLD — price stayed flat
+    if ret > 0.02:  return 1   # UP
+    else:           return 0   # DOWN
 
 df['label'] = df['future_return'].apply(label)
 
@@ -88,7 +101,9 @@ features = [
     'RSI', 'MACD', 'MACD_sig', 'MACD_hist',
     'ATR_pct', 'BB_pct',
     'momentum_3', 'momentum_7', 'momentum_14',
-    'vol_ratio', 'ma7_21_ratio', 'ma21_50_ratio', 'price_ma50'
+    'vol_ratio', 'ma7_21_ratio', 'ma21_50_ratio', 'price_ma50',
+    'prev_day_1', 'prev_day_2', 'prev_day_3',
+    'hl_range', 'close_pos', 'vol_spike'
 ]
 
 df = df.dropna()
@@ -107,9 +122,10 @@ X_train, X_test, y_train, y_test = train_test_split(
 )
 
 model = RandomForestClassifier(
-    n_estimators=200,
-    max_depth=10,
-    min_samples_split=20,
+    n_estimators=500,
+    max_depth=15,
+    min_samples_split=10,
+    min_samples_leaf=5,
     random_state=42,
     class_weight='balanced'
 )
@@ -117,8 +133,8 @@ model.fit(X_train, y_train)
 
 # ── Step 6: Evaluate ──
 print("📊 Evaluating model...")
-y_pred    = model.predict(X_test)
-accuracy  = accuracy_score(y_test, y_pred)
+y_pred   = model.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
 
 print(f"\n🎯 MODEL RESULTS")
 print("=" * 45)
@@ -126,7 +142,7 @@ print(f"Accuracy        : {accuracy*100:.1f}%")
 print(f"Training samples: {len(X_train)}")
 print(f"Testing samples : {len(X_test)}")
 print(f"\n📋 Detailed Report:")
-print(classification_report(y_test, y_pred, target_names=['SELL','HOLD','BUY']))
+print(classification_report(y_test, y_pred, target_names=['DOWN','UP']))
 
 # ── Step 7: Feature importance ──
 print("🔍 Most important features:")
@@ -144,12 +160,11 @@ print(f"\n📡 Current market prediction:")
 latest_features = X.iloc[-1][features].values.reshape(1, -1)
 prediction      = model.predict(latest_features)[0]
 probability     = model.predict_proba(latest_features)[0]
-classes         = model.classes_
 
-pred_label = {1: '🟢 BUY', -1: '🔴 SELL', 0: '⚪ HOLD'}
+pred_label = {1: '🟢 Price going UP', 0: '🔴 Price going DOWN'}
 print(f"   Signal     : {pred_label[prediction]}")
-for cls, prob in zip(classes, probability):
-    print(f"   {pred_label[cls]:<12} confidence: {prob*100:.1f}%")
+print(f"   UP   confidence: {probability[1]*100:.1f}%")
+print(f"   DOWN confidence: {probability[0]*100:.1f}%")
 
 # ── Step 9: Save model ──
 with open('model.pkl', 'wb') as f:

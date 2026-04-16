@@ -2,7 +2,7 @@ import ccxt
 import pandas as pd
 
 # Fetch data
-exchange = ccxt.kucoin()
+exchange = ccxt.bybit()
 ohlcv = exchange.fetch_ohlcv('BTC/USDT', '1d', limit=500)
 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
